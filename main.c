@@ -8,6 +8,7 @@
 #define NODE_RADIUS 20
 #define MAX_CONNECTIONS 10
 
+
 typedef struct Node
 {
   float x, y;
@@ -19,6 +20,79 @@ typedef struct Node
 
 Node nodes[MAX_NODES];
 int nodeCount = 0;
+
+typedef enum ActionType
+{
+  ACTION_ADD_NODE,
+  ACTION_CONNECT_NODES
+} ActionType;
+
+typedef struct Action
+{
+  ActionType type;
+  int nodeA;
+  int nodeB; // Para conexão, ou -1 para adição de nó
+} Action;
+
+Action actionStack[100];
+int actionTop = -1;
+
+void PushAction(ActionType type, int a, int b)
+{
+  if (actionTop < 99)
+  {
+    actionTop++;
+    actionStack[actionTop].type = type;
+    actionStack[actionTop].nodeA = a;
+    actionStack[actionTop].nodeB = b;
+  }
+}
+
+void UndoAction()
+{
+  if (actionTop < 0)
+    return; // Nada para desfazer
+
+  Action act = actionStack[actionTop--];
+
+  if (act.type == ACTION_ADD_NODE)
+  {
+    // Remove o último nó adicionado
+    if (nodeCount > 0)
+      nodeCount--;
+  }
+  else if (act.type == ACTION_CONNECT_NODES)
+  {
+    // Remove a conexão
+    int a = act.nodeA;
+    int b = act.nodeB;
+    // Remover de A
+    for (int i = 0; i < nodes[a].connectionCount; i++)
+    {
+      if (nodes[a].connections[i] == b)
+      {
+        for (int j = i; j < nodes[a].connectionCount - 1; j++)
+          nodes[a].connections[j] = nodes[a].connections[j + 1];
+        nodes[a].connectionCount--;
+        break;
+      }
+    }
+    // Remover de B
+    for (int i = 0; i < nodes[b].connectionCount; i++)
+    {
+      if (nodes[b].connections[i] == a)
+      {
+        for (int j = i; j < nodes[b].connectionCount - 1; j++)
+          nodes[b].connections[j] = nodes[b].connections[j + 1];
+        nodes[b].connectionCount--;
+        break;
+      }
+    }
+    // Opcional: remover parentId se for igual a a
+    if (nodes[b].parentId == a)
+      nodes[b].parentId = -1;
+  }
+}
 
 // Adiciona nó na posição x, y
 void AddNode(float x, float y)
@@ -61,15 +135,25 @@ void ConnectNodes(int a, int b)
   if (a < 0 || b < 0 || a >= nodeCount || b >= nodeCount || a == b)
     return;
 
-  nodes[a].connections[nodes[a].connectionCount++] = b;
-  nodes[b].connections[nodes[b].connectionCount++] = a;
-  
-  if (a >= 0 && a < nodeCount && b >= 0 && b < nodeCount)
-  {
-    nodes[b].parentId = a;
-    }
-}
+  // Adiciona a conexão se ainda não existir
+  int exists = 0;
+  for (int i = 0; i < nodes[a].connectionCount; i++)
+    if (nodes[a].connections[i] == b)
+      exists = 1;
+  if (!exists)
+    nodes[a].connections[nodes[a].connectionCount++] = b;
 
+  exists = 0;
+  for (int i = 0; i < nodes[b].connectionCount; i++)
+    if (nodes[b].connections[i] == a)
+      exists = 1;
+  if (!exists)
+    nodes[b].connections[nodes[b].connectionCount++] = a;
+
+  // Define parentId apenas se ainda não tiver pai
+  if (nodes[b].parentId == -1)
+    nodes[b].parentId = a;
+}
 
 int BuildPath(int start, int goal, int *path, int maxLen)
 {
@@ -164,7 +248,7 @@ void SendMessage(int fromId, int toId)
 
 int main(void)
 {
-  InitWindow(800, 600, "Simulador de Rede - Raylib");
+  InitWindow(800, 700, "Simulador de Rede - Raylib");
   SetTargetFPS(60);
   int mode = 0;
   int connectMode = 0;
@@ -173,10 +257,15 @@ int main(void)
   while (!WindowShouldClose())
   {
     // Clique esquerdo para adicionar nó
-    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && mode == 0)
     {
       Vector2 mouse = GetMousePosition();
       AddNode(mouse.x, mouse.y);
+      PushAction(ACTION_ADD_NODE, nodeCount - 1, -1); // registra ação
+    }
+    if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_Z))
+    {
+      UndoAction();
     }
 
     // Clique direito para selecionar nó
@@ -200,6 +289,7 @@ int main(void)
             {
               toNode = i;
               ConnectNodes(fromNode, toNode);
+              PushAction(ACTION_CONNECT_NODES, fromNode, toNode);
               fromNode = toNode;
               toNode = -1;
             }
