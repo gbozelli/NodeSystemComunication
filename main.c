@@ -15,7 +15,7 @@ typedef struct Node
   int id;
   int connections[MAX_CONNECTIONS];
   int connectionCount;
-  int parentId; // -1 se não tiver pai
+  int parentId; 
 } Node;
 
 Node nodes[MAX_NODES];
@@ -246,9 +246,54 @@ void SendMessage(int fromId, int toId)
   }
 }
 
+// Função simples para desenhar uma caixa de texto e capturar números
+int DrawTextBox(const char *label, int x, int y, int width, int *value, bool active)
+{
+    char buffer[16];
+    sprintf(buffer, "%d", *value);
+
+    DrawRectangle(x, y, width, 30, active ? LIGHTGRAY : GRAY);
+    DrawText(label, x - 80, y + 5, 20, DARKGRAY);
+    DrawText(buffer, x + 5, y + 5, 20, BLACK);
+
+    return (CheckCollisionPointRec(GetMousePosition(), (Rectangle){x, y, width, 30}) &&
+            IsMouseButtonPressed(MOUSE_LEFT_BUTTON));
+}
+
+
 int main(void)
 {
-  InitWindow(800, 700, "Simulador de Rede - Raylib");
+  int fromInput = 0;
+  int toInput = 0;
+  int msgSize = 1;
+
+  int activeField = -1; // 0 = origem, 1 = destino, 2 = tamanho
+  // Digitar valores quando campo estiver ativo
+  if (activeField != -1 && GetKeyPressed())
+  {
+    int key = GetKeyPressed();
+    if (key >= KEY_ZERO && key <= KEY_NINE)
+    {
+      int digit = key - KEY_ZERO;
+      if (activeField == 0)
+        fromInput = fromInput * 10 + digit;
+      else if (activeField == 1)
+        toInput = toInput * 10 + digit;
+      else if (activeField == 2)
+        msgSize = msgSize * 10 + digit;
+    }
+    else if (key == KEY_BACKSPACE)
+    {
+      if (activeField == 0)
+        fromInput /= 10;
+      else if (activeField == 1)
+        toInput /= 10;
+      else if (activeField == 2)
+        msgSize /= 10;
+    }
+  }
+
+  InitWindow(1000, 700, "Simulador de Rede - Raylib");
   SetTargetFPS(60);
   int mode = 0;
   int connectMode = 0;
@@ -333,6 +378,31 @@ int main(void)
 
     BeginDrawing();
     ClearBackground(RAYWHITE);
+    // Painel lateral
+    DrawRectangle(750, 0, 800, 700, Fade(LIGHTGRAY, 0.5f));
+    DrawText("MENU", 850, 20, 20, BLACK);
+
+    if (DrawTextBox("Origem:", 850, 60, 100, &fromInput, activeField == 0))
+      activeField = 0;
+    if (DrawTextBox("Destino:", 850, 100, 100, &toInput, activeField == 1))
+      activeField = 1;
+    if (DrawTextBox("Tam:", 850, 140, 100, &msgSize, activeField == 2))
+      activeField = 2;
+
+    // Botão Enviar
+    DrawRectangle(850, 200, 100, 30, MAROON);
+    DrawText("ENVIAR", 855, 205, 20, WHITE);
+
+    if (CheckCollisionPointRec(GetMousePosition(), (Rectangle){650, 200, 100, 30}) &&
+        IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+    {
+      if (fromInput >= 0 && fromInput < nodeCount &&
+          toInput >= 0 && toInput < nodeCount &&
+          fromInput != toInput)
+      {
+        SendMessage(fromInput, toInput);
+      }
+    }
 
     if (mode == 0)
     {
