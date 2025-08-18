@@ -3,7 +3,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h> // para rand()
+#include <time.h>   // para srand
 
+#define PROB_SUCCESS 0.1f // 80% de chance de mensagem chegar
 #define MAX_NODES 50
 #define NODE_RADIUS 20
 #define MAX_CONNECTIONS 10
@@ -18,6 +21,16 @@ typedef struct Node
 
 Node nodes[MAX_NODES];
 int nodeCount = 0;
+
+typedef struct Message
+{
+  int from;
+  int to;
+  int id;
+  bool ackReceived;
+  float timer;   // tempo decorrido desde envio
+  float timeout; // limite para reenviar
+} Message;
 
 typedef enum ActionType
 {
@@ -405,6 +418,92 @@ void DrawUI(int *fromNode, int *toNode, int *msgCount, bool *sendPressed, int *m
   }
 }
 
+void SendMessageWithAckAnim(int fromId, int toId)
+{
+  int steps = 50; // número de frames da animação
+  Vector2 start = {nodes[fromId].x, nodes[fromId].y};
+  Vector2 end = {nodes[toId].x, nodes[toId].y};
+
+  // --- Mensagem indo (vermelha) ---
+  for (int i = 0; i <= steps; i++)
+  {
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
+    DrawNetwork();
+
+    float t = (float)i / steps;
+    Vector2 pos = {start.x + (end.x - start.x) * t,
+                   start.y + (end.y - start.y) * t};
+    DrawCircleV(pos, 8, RED); // mensagem
+    EndDrawing();
+  }
+
+  // --- ACK voltando (verde) ---
+  for (int i = 0; i <= steps; i++)
+  {
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
+    DrawNetwork();
+
+    float t = (float)i / steps;
+    Vector2 pos = {end.x + (start.x - end.x) * t,
+                   end.y + (start.y - end.y) * t};
+    DrawCircleV(pos, 6, GREEN); // ACK menor
+    EndDrawing();
+  }
+}
+
+void SendMessagesWithAck(int fromNode, int toNode, int msgCount)
+{
+  Message messages[msgCount];
+  for (int i = 0; i < msgCount; i++)
+  {
+    messages[i].from = fromNode;
+    messages[i].to = toNode;
+    messages[i].id = i;
+    messages[i].ackReceived = false;
+    messages[i].timer = 0;
+    messages[i].timeout = 1.0f; // 1 segundo para ACK
+  }
+
+  int currentMsg = 0;
+  float dt = 0.016f; // ~60FPS
+  while (currentMsg < msgCount)
+  {
+    BeginDrawing();
+    ClearBackground(RAYWHITE);
+    DrawNetwork();
+
+    Message *msg = &messages[currentMsg];
+
+    // === Só envia se ainda não recebeu ACK ===
+    if (!msg->ackReceived)
+    {
+      msg->timer += dt;
+      SendMessage(msg->from, msg->to,1);
+      // Probabilidade de a mensagem chegar
+      if ((float)rand() / RAND_MAX < PROB_SUCCESS)
+      {
+        // mensagem chegou: desenha animada
+        SendMessageWithAckAnim(msg->from, msg->to);
+
+        // ACK instantâneo
+        msg->ackReceived = true;
+        currentMsg++;
+      }
+      else if (msg->timer >= msg->timeout)
+      {
+        // Timeout: reenviar
+        msg->timer = 0;
+      }
+    }
+
+    EndDrawing();
+    // Atualiza tempo real (simula dt)
+    // Pode usar Sleep(dt*1000) se quiser desacelerar visual
+  }
+}
+
 int main(void)
 {
   InitWindow(800, 700, "Simulador de Rede - Raylib");
@@ -501,7 +600,7 @@ int main(void)
               else if (toNode == -1 && i != fromNode)
               {
                 toNode = i;
-                SendMessage(fromNode, toNode, 1);
+                SendMessagesWithAck(fromNode, toNode, 1);
                 fromNode = -1;
                 toNode = -1;
               }
@@ -521,7 +620,7 @@ int main(void)
     }
     if (mode == 1 && IsKeyPressed(KEY_S) && fromNode != -1 && toNode != -1)
     {
-      SendMessage(fromNode, toNode, 1);
+      SendMessagesWithAck(fromNode, toNode, 1);
     }
     if (IsKeyPressed(KEY_W))
     {
@@ -567,7 +666,7 @@ int main(void)
     {
       sendPressed = false;
       if (fromNode >= 0 && toNode >= 0 && fromNode < nodeCount && toNode < nodeCount)
-        SendMessage(fromNode, toNode, msgCount);
+        SendMessagesWithAck(fromNode, toNode, msgCount);
     }
     EndDrawing();
   }
