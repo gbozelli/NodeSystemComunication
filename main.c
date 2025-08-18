@@ -206,36 +206,37 @@ int BuildPath(int start, int goal, int *path, int maxLen)
   return len;
 }
 
-void SendMessage(int fromId, int toId)
+void SendMessage(int fromId, int toId, int repetitions)
 {
   int path[50];
   int pathLength = BuildPath(fromId, toId, path, 50);
-
   if (pathLength == -1)
   {
     printf("Caminho não encontrado!\n");
     return;
   }
 
-  for (int i = 0; i < pathLength - 1; i++)
+  for (int r = 0; r < repetitions; r++)
   {
-    Vector2 start = {nodes[path[i]].x, nodes[path[i]].y};
-    Vector2 end = {nodes[path[i + 1]].x, nodes[path[i + 1]].y};
-
-    for (float t = 0; t <= 1; t += 0.02f)
+    for (int i = 0; i < pathLength - 1; i++)
     {
-      BeginDrawing();
-      ClearBackground(RAYWHITE);
+      Vector2 start = {nodes[path[i]].x, nodes[path[i]].y};
+      Vector2 end = {nodes[path[i + 1]].x, nodes[path[i + 1]].y};
 
-      DrawNetwork();
+      for (float t = 0; t <= 1; t += 0.02f)
+      {
+        BeginDrawing();
+        ClearBackground(RAYWHITE);
 
-      // desenha a mensagem
-      Vector2 pos = {
-          start.x + (end.x - start.x) * t,
-          start.y + (end.y - start.y) * t};
-      DrawCircleV(pos, 8, RED);
+        DrawNetwork();
 
-      EndDrawing();
+        Vector2 pos = {
+            start.x + (end.x - start.x) * t,
+            start.y + (end.y - start.y) * t};
+        DrawCircleV(pos, 8, RED);
+
+        EndDrawing();
+      }
     }
   }
 }
@@ -263,6 +264,147 @@ void CreateDefaultNetwork()
   ConnectNodes(3, 5);
 }
 
+void DrawUI(int *fromNode, int *toNode, int *msgCount, bool *sendPressed, int *mode)
+{
+  static char fromText[8] = "0";
+  static char toText[8] = "1";
+  static char msgText[8] = "1";
+
+  static int activeBox = -1; // -1 = nenhum, 0 = origem, 1 = destino, 2 = qtd msgs
+
+  Vector2 mouse = GetMousePosition();
+
+  // === Labels ===
+  // === Pega largura e altura da tela ===
+  int screenW = GetScreenWidth();
+  int screenH = GetScreenHeight();
+
+  // === Margens ===
+  int marginX = 20;
+  int marginY = 20;
+
+  // === Dimensões da caixa ===
+  int boxW = 60;
+  int boxH = 30;
+
+  // === Altura entre cada campo ===
+  int spacing = 40;
+
+  // === Posição inicial (primeira caixa) ===
+  int startX = screenW - boxW - 100 - marginX; // 100 ~ largura estimada do texto
+  int startY = screenH - (3 * boxH + 2 * spacing) - marginY;
+
+  // === Textos ===
+  DrawText("Origem:", startX, startY, 20, DARKGRAY);
+  DrawText("Destino:", startX, startY + spacing, 20, DARKGRAY);
+  DrawText("Qtd Msgs:", startX, startY + 2 * spacing, 20, DARKGRAY);
+
+  // === Input boxes ===
+  Rectangle boxFrom = {startX + 100, startY, boxW, boxH};
+  Rectangle boxTo = {startX + 100, startY + spacing, boxW, boxH};
+  Rectangle boxMsg = {startX + 100, startY + 2 * spacing, boxW, boxH};
+
+  // Clique para ativar caixa
+  if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+  {
+    if (CheckCollisionPointRec(mouse, boxFrom))
+      activeBox = 0;
+    else if (CheckCollisionPointRec(mouse, boxTo))
+      activeBox = 1;
+    else if (CheckCollisionPointRec(mouse, boxMsg))
+      activeBox = 2;
+    else
+      activeBox = -1;
+  }
+
+  // Captura entrada de texto
+  int key = GetCharPressed();
+  while (key > 0)
+  {
+    char *target = NULL;
+    if (activeBox == 0)
+      target = fromText;
+    if (activeBox == 1)
+      target = toText;
+    if (activeBox == 2)
+      target = msgText;
+
+    if (target)
+    {
+      int len = strlen(target);
+      if (key >= 48 && key <= 57 && len < 7) // só números
+      {
+        target[len] = (char)key;
+        target[len + 1] = '\0';
+      }
+    }
+    key = GetCharPressed();
+  }
+
+  // Backspace
+  if (IsKeyPressed(KEY_BACKSPACE) && activeBox != -1)
+  {
+    char *target = NULL;
+    if (activeBox == 0)
+      target = fromText;
+    if (activeBox == 1)
+      target = toText;
+    if (activeBox == 2)
+      target = msgText;
+
+    int len = strlen(target);
+    if (len > 0)
+      target[len - 1] = '\0';
+  }
+
+
+
+  // === Desenha caixas com borda ===
+  DrawRectangleLinesEx(boxFrom, 2, (activeBox == 0) ? RED : DARKGRAY);
+  DrawRectangleLinesEx(boxTo, 2, (activeBox == 1) ? RED : DARKGRAY);
+  DrawRectangleLinesEx(boxMsg, 2, (activeBox == 2) ? RED : DARKGRAY);
+
+  // === Desenha textos dentro das caixas ===
+  DrawText(fromText, boxFrom.x + 5, boxFrom.y + 5, 20, BLACK);
+  DrawText(toText, boxTo.x + 5, boxTo.y + 5, 20, BLACK);
+  DrawText(msgText, boxMsg.x + 5, boxMsg.y + 5, 20, BLACK);
+
+  // === Labels ===
+  DrawText("Origem:", startX, startY, 20, DARKGRAY);
+  DrawText("Destino:", startX, startY + spacing, 20, DARKGRAY);
+  DrawText("Qtd Msgs:", startX, startY + 2 * spacing, 20, DARKGRAY);
+
+  // === Botão Enviar ===
+  Rectangle btn = {startX, startY + 3 * spacing, boxW + 100, boxH};
+  DrawRectangleRec(btn, LIGHTGRAY);
+  DrawRectangleLinesEx(btn, 2, DARKGRAY);
+  DrawText("Enviar Mensagens", btn.x + 10, btn.y + 5, 20, BLACK);
+
+  if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(mouse, btn))
+  {
+    *fromNode = atoi(fromText);
+    *toNode = atoi(toText);
+    *msgCount = atoi(msgText);
+    *sendPressed = true;
+  }
+  // Área do painel da UI (cobre labels, caixas e botão)
+  Rectangle uiArea;
+  uiArea.x = startX;
+  uiArea.y = startY;
+  uiArea.width = boxW + 120;               // largura total aproximada do painel
+  uiArea.height = 3 * spacing + boxH + 50; // altura total incluindo botão
+
+
+  if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && mode == 0)
+  {
+    if (!CheckCollisionPointRec(mouse, uiArea)) // só cria nó fora da UI
+    {
+      AddNode(mouse.x, mouse.y);
+      PushAction(ACTION_ADD_NODE, nodeCount - 1, -1);
+    }
+  }
+}
+
 int main(void)
 {
   InitWindow(800, 700, "Simulador de Rede - Raylib");
@@ -270,15 +412,48 @@ int main(void)
   int mode = 0;
   int connectMode = 0;
   int fromNode = -1, toNode = -1;
+  int msgCount = 0;
+  bool sendPressed = false;
 
   while (!WindowShouldClose())
   {
+    
+    // --- Calcula área da UI (mesmo que em DrawUI) ---
+    int screenW = GetScreenWidth();
+    int screenH = GetScreenHeight();
+    int boxW = 60, boxH = 30, spacing = 40;
+    int startX = screenW - boxW - 100 - 20;
+    int startY = screenH - (3 * boxH + 2 * spacing + 40) - 20;
+    Rectangle uiArea = {startX, startY, boxW + 120, 3 * spacing + boxH + 50};
+
+    // --- Desenha fundo cinza semi-transparente ---
+    DrawRectangleRec(uiArea, (Color){200, 200, 200, 180}); // cinza claro com alpha 180
+
+    // --- Desenha borda para destacar ---
+    DrawRectangleLinesEx(uiArea, 2, DARKGRAY);
+
+    Vector2 mouse = GetMousePosition();
+    if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+    {
+      if (!CheckCollisionPointRec(mouse, uiArea)) // só cria nó fora da UI
+      {
+        AddNode(mouse.x, mouse.y);
+        PushAction(ACTION_ADD_NODE, nodeCount - 1, -1);
+      }
+    }
+
+    // --- Depois desenha a UI normalmente ---
+    DrawUI(&fromNode, &toNode, &msgCount, &sendPressed, &mode);
+
     // Clique esquerdo para adicionar nó
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && mode == 0)
     {
       Vector2 mouse = GetMousePosition();
-      AddNode(mouse.x, mouse.y);
-      PushAction(ACTION_ADD_NODE, nodeCount - 1, -1); // registra ação
+      if (!CheckCollisionPointRec(mouse, uiArea)) // só cria nó fora da UI
+      {
+        AddNode(mouse.x, mouse.y);
+        PushAction(ACTION_ADD_NODE, nodeCount - 1, -1);
+      }
     }
     if (IsKeyDown(KEY_LEFT_CONTROL) && IsKeyPressed(KEY_Z))
     {
@@ -326,7 +501,7 @@ int main(void)
               else if (toNode == -1 && i != fromNode)
               {
                 toNode = i;
-                SendMessage(fromNode, toNode);
+                SendMessage(fromNode, toNode, 1);
                 fromNode = -1;
                 toNode = -1;
               }
@@ -346,7 +521,7 @@ int main(void)
     }
     if (mode == 1 && IsKeyPressed(KEY_S) && fromNode != -1 && toNode != -1)
     {
-      SendMessage(fromNode, toNode);
+      SendMessage(fromNode, toNode, 1);
     }
     if (IsKeyPressed(KEY_W))
     {
@@ -362,13 +537,9 @@ int main(void)
       DrawText("Modo NORMAL", 10, 10, 20, DARKGRAY);
       DrawText("Clique ESQUERDO: Adicionar nó", 10, 40, 20, DARKGRAY);
       DrawText("Clique DIREITO: Conectar nós (clique nos nós que serão conectados)", 10, 70, 20, DARKGRAY);
-      DrawText("Pressione M: Entrar no modo MENSAGEM", 10, 100, 20, DARKGRAY);
     }
     else
     {
-      DrawText("Modo MENSAGEM", 10, 10, 20, DARKGRAY);
-      DrawText("Clique DIREITO: Selecionar origem e destino para enviar mensagem", 10, 40, 20, DARKGRAY);
-      DrawText("Pressione M: Voltar ao modo NORMAL", 10, 70, 20, DARKGRAY);
 
       char buff[64];
       if (fromNode != -1)
@@ -392,6 +563,12 @@ int main(void)
     DrawText(fromText, 10, 160, 20, RED);
 
     DrawNetwork();
+    if (sendPressed)
+    {
+      sendPressed = false;
+      if (fromNode >= 0 && toNode >= 0 && fromNode < nodeCount && toNode < nodeCount)
+        SendMessage(fromNode, toNode, msgCount);
+    }
     EndDrawing();
   }
 
