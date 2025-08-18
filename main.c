@@ -8,14 +8,12 @@
 #define NODE_RADIUS 20
 #define MAX_CONNECTIONS 10
 
-
 typedef struct Node
 {
   float x, y;
   int id;
   int connections[MAX_CONNECTIONS];
   int connectionCount;
-  int parentId; 
 } Node;
 
 Node nodes[MAX_NODES];
@@ -88,9 +86,8 @@ void UndoAction()
         break;
       }
     }
-    // Opcional: remover parentId se for igual a a
-    if (nodes[b].parentId == a)
-      nodes[b].parentId = -1;
+
+
   }
 }
 
@@ -102,10 +99,8 @@ void AddNode(float x, float y)
   nodes[nodeCount].id = nodeCount;
   nodes[nodeCount].x = x;
   nodes[nodeCount].y = y;
-  nodes[nodeCount].parentId = -1;
   nodeCount++;
 }
-
 
 // Desenha os nós e conexões
 void DrawNetwork()
@@ -113,10 +108,12 @@ void DrawNetwork()
   // Conexões
   for (int i = 0; i < nodeCount; i++)
   {
-    if (nodes[i].parentId != -1)
+    for (int j = 0; j < nodes[i].connectionCount; j++)
     {
-      DrawLine(nodes[i].x, nodes[i].y,
-               nodes[nodes[i].parentId].x, nodes[nodes[i].parentId].y, GRAY);
+      int b = nodes[i].connections[j];
+      if (b > i) // evita duplicar a linha (desenha só uma vez)
+        DrawLine(nodes[i].x, nodes[i].y,
+                 nodes[b].x, nodes[b].y, GRAY);
     }
   }
 
@@ -135,7 +132,7 @@ void ConnectNodes(int a, int b)
   if (a < 0 || b < 0 || a >= nodeCount || b >= nodeCount || a == b)
     return;
 
-  // Adiciona a conexão se ainda não existir
+  // Adiciona conexão em A → B se não existir
   int exists = 0;
   for (int i = 0; i < nodes[a].connectionCount; i++)
     if (nodes[a].connections[i] == b)
@@ -143,16 +140,13 @@ void ConnectNodes(int a, int b)
   if (!exists)
     nodes[a].connections[nodes[a].connectionCount++] = b;
 
+  // Adiciona conexão em B → A se não existir
   exists = 0;
   for (int i = 0; i < nodes[b].connectionCount; i++)
     if (nodes[b].connections[i] == a)
       exists = 1;
   if (!exists)
     nodes[b].connections[nodes[b].connectionCount++] = a;
-
-  // Define parentId apenas se ainda não tiver pai
-  if (nodes[b].parentId == -1)
-    nodes[b].parentId = a;
 }
 
 int BuildPath(int start, int goal, int *path, int maxLen)
@@ -246,54 +240,32 @@ void SendMessage(int fromId, int toId)
   }
 }
 
-// Função simples para desenhar uma caixa de texto e capturar números
-int DrawTextBox(const char *label, int x, int y, int width, int *value, bool active)
+// === Função para criar rede pré-pronta ===
+void CreateDefaultNetwork()
 {
-    char buffer[16];
-    sprintf(buffer, "%d", *value);
+  // Limpa rede
+  nodeCount = 0;
 
-    DrawRectangle(x, y, width, 30, active ? LIGHTGRAY : GRAY);
-    DrawText(label, x - 80, y + 5, 20, DARKGRAY);
-    DrawText(buffer, x + 5, y + 5, 20, BLACK);
+  // Adiciona alguns nós em posições fixas
+  AddNode(150, 400); // nó 0
+  AddNode(300, 350); // nó 1
+  AddNode(300, 650); // nó 2
+  AddNode(450, 400); // nó 3
+  AddNode(600, 350); // nó 4
+  AddNode(600, 650); // nó 5
 
-    return (CheckCollisionPointRec(GetMousePosition(), (Rectangle){x, y, width, 30}) &&
-            IsMouseButtonPressed(MOUSE_LEFT_BUTTON));
+  // Conexões
+  ConnectNodes(0, 1);
+  ConnectNodes(0, 2);
+  ConnectNodes(1, 3);
+  ConnectNodes(2, 3);
+  ConnectNodes(3, 4);
+  ConnectNodes(3, 5);
 }
-
 
 int main(void)
 {
-  int fromInput = 0;
-  int toInput = 0;
-  int msgSize = 1;
-
-  int activeField = -1; // 0 = origem, 1 = destino, 2 = tamanho
-  // Digitar valores quando campo estiver ativo
-  if (activeField != -1 && GetKeyPressed())
-  {
-    int key = GetKeyPressed();
-    if (key >= KEY_ZERO && key <= KEY_NINE)
-    {
-      int digit = key - KEY_ZERO;
-      if (activeField == 0)
-        fromInput = fromInput * 10 + digit;
-      else if (activeField == 1)
-        toInput = toInput * 10 + digit;
-      else if (activeField == 2)
-        msgSize = msgSize * 10 + digit;
-    }
-    else if (key == KEY_BACKSPACE)
-    {
-      if (activeField == 0)
-        fromInput /= 10;
-      else if (activeField == 1)
-        toInput /= 10;
-      else if (activeField == 2)
-        msgSize /= 10;
-    }
-  }
-
-  InitWindow(1000, 700, "Simulador de Rede - Raylib");
+  InitWindow(800, 700, "Simulador de Rede - Raylib");
   SetTargetFPS(60);
   int mode = 0;
   int connectMode = 0;
@@ -313,51 +285,56 @@ int main(void)
       UndoAction();
     }
 
-    // Clique direito para selecionar nó
-    if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))
+    if (IsKeyDown(KEY_Q))
     {
-      Vector2 mouse = GetMousePosition();
-      for (int i = 0; i < nodeCount; i++)
+      CreateDefaultNetwork();
+    }
+
+      // Clique direito para selecionar nó
+      if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))
       {
-        float dist = sqrtf((mouse.x - nodes[i].x) * (mouse.x - nodes[i].x) + (mouse.y - nodes[i].y) * (mouse.y - nodes[i].y));
-        if (dist <= NODE_RADIUS)
+        Vector2 mouse = GetMousePosition();
+        for (int i = 0; i < nodeCount; i++)
         {
-          if (mode == 0)
+          float dist = sqrtf((mouse.x - nodes[i].x) * (mouse.x - nodes[i].x) + (mouse.y - nodes[i].y) * (mouse.y - nodes[i].y));
+          if (dist <= NODE_RADIUS)
           {
-            // modo normal conecta nós (sua lógica original)
-            if (connectMode == 0)
+            if (mode == 0)
             {
-              fromNode = i;
-              connectMode = 1;
+              // modo normal conecta nós (sua lógica original)
+              if (connectMode == 0)
+              {
+                fromNode = i;
+                connectMode = 1;
+              }
+              else
+              {
+                toNode = i;
+                ConnectNodes(fromNode, toNode);
+                PushAction(ACTION_CONNECT_NODES, fromNode, toNode);
+                fromNode = toNode;
+                toNode = -1;
+              }
             }
             else
             {
-              toNode = i;
-              ConnectNodes(fromNode, toNode);
-              PushAction(ACTION_CONNECT_NODES, fromNode, toNode);
-              fromNode = toNode;
-              toNode = -1;
+              // modo mensagem: seleciona origem e destino para enviar mensagem
+              if (fromNode == -1)
+              {
+                fromNode = i;
+              }
+              else if (toNode == -1 && i != fromNode)
+              {
+                toNode = i;
+                SendMessage(fromNode, toNode);
+                fromNode = -1;
+                toNode = -1;
+              }
             }
+            break;
           }
-          else
-          {
-            // modo mensagem: seleciona origem e destino para enviar mensagem
-            if (fromNode == -1)
-            {
-              fromNode = i;
-            }
-            else if (toNode == -1 && i != fromNode)
-            {
-              toNode = i;
-              SendMessage(fromNode, toNode);
-              fromNode = -1;
-              toNode = -1;
-            }
-          }
-          break;
         }
       }
-    }
 
     // Tecla 'S' para enviar mensagem do último par selecionado
     if (IsKeyPressed(KEY_M))
@@ -373,36 +350,12 @@ int main(void)
     }
     if (IsKeyPressed(KEY_W))
     {
-      fromNode = -1, toNode = -1; connectMode = 0;
+      fromNode = -1, toNode = -1;
+      connectMode = 0;
     }
 
     BeginDrawing();
     ClearBackground(RAYWHITE);
-    // Painel lateral
-    DrawRectangle(750, 0, 800, 700, Fade(LIGHTGRAY, 0.5f));
-    DrawText("MENU", 850, 20, 20, BLACK);
-
-    if (DrawTextBox("Origem:", 850, 60, 100, &fromInput, activeField == 0))
-      activeField = 0;
-    if (DrawTextBox("Destino:", 850, 100, 100, &toInput, activeField == 1))
-      activeField = 1;
-    if (DrawTextBox("Tam:", 850, 140, 100, &msgSize, activeField == 2))
-      activeField = 2;
-
-    // Botão Enviar
-    DrawRectangle(850, 200, 100, 30, MAROON);
-    DrawText("ENVIAR", 855, 205, 20, WHITE);
-
-    if (CheckCollisionPointRec(GetMousePosition(), (Rectangle){650, 200, 100, 30}) &&
-        IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
-    {
-      if (fromInput >= 0 && fromInput < nodeCount &&
-          toInput >= 0 && toInput < nodeCount &&
-          fromInput != toInput)
-      {
-        SendMessage(fromInput, toInput);
-      }
-    }
 
     if (mode == 0)
     {
