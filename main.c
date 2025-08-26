@@ -5,15 +5,24 @@
 #include <math.h>
 #include <time.h>
 
-#define PROB_SUCCESS 0.5f
+#define PROB_SUCCESS 0.99f // Chance de sucesso alta para testar a lógica de bloqueio
 #define MAX_NODES 50
 #define NODE_RADIUS 20
 #define MAX_CONNECTIONS 10
-#define MAX_MESSAGES 100
-#define MESSAGE_SPEED 1.5f    // Velocidade da animação da mensagem
-#define MESSAGE_INTERVAL 0.2f // Intervalo de 0.2s entre o envio de cada mensagem em lote
+#define MAX_MESSAGES 100000
+#define MESSAGE_SPEED 1.5f
+#define MESSAGE_INTERVAL 0.2f
+#define QUEUE_OFFSET_X 25 // Distância X do nó para a fila
+#define QUEUE_OFFSET_Y 15 // Distância Y entre mensagens na fila
 
-// ... (As structs Node, AsyncMessage, ActionType, Action continuam as mesmas) ...
+// NOVO: A struct Network será usada para rastrear o tráfego direcional
+typedef struct Network
+{
+  int graph[MAX_NODES][MAX_NODES];
+} Network;
+
+Network busyNetwork; // Instância global para o nosso placar de tráfego
+
 typedef struct Node
 {
   float x, y;
@@ -29,25 +38,28 @@ typedef enum MsgState
 {
   SENDING,
   ACK_RECEIVING,
-  DONE
+  DONE,
+  QUEUED,
 } MsgState;
 
+// ALTERADO: A struct da mensagem precisa de um caminho separado para o ACK
 typedef struct AsyncMessage
 {
   int from;
   int to;
   MsgState state;
-  float progress; // 0 a 1 para animar o trecho atual
+  float progress;
 
-  int ackSegment;      // índice do segmento do ACK
-  int path[MAX_NODES]; // caminho completo
-  int pathLength;      // tamanho do caminho
-  int currentSegment;  // segmento atual do caminho
+  int currentSegment;
+  int path[MAX_NODES];
+  int pathLength;
+
+  int currentAckSegment;
+  int ackPath[MAX_NODES];
+  int ackPathLength;
+  int queuedAtNodeId;
+
 } AsyncMessage;
-
-typedef struct Network{
-  int path[MAX_NODES][MAX_NODES];
-} Network;
 
 AsyncMessage messages[MAX_MESSAGES];
 int messageCount = 0;
@@ -67,7 +79,6 @@ typedef struct Action
 
 Action actionStack[100];
 int actionTop = -1;
-// ... (As funções PushAction, UndoAction, AddNode, DrawNetwork, ConnectNodes, BuildPath, CreateDefaultNetwork continuam as mesmas) ...
 
 void PushAction(ActionType type, int a, int b)
 {
@@ -173,18 +184,18 @@ void ConnectNodes(int a, int b)
     nodes[b].connections[nodes[b].connectionCount++] = a;
 }
 
-int BuildPath(int start, int goal, int *path, int maxLen)
+// --- Lógica Principal da Rede ---
+
+int BuildPath(int start, int goal, int *path, int maxLen, Network *currentTraffic)
 {
   int visited[MAX_NODES] = {0};
   int parent[MAX_NODES];
   for (int i = 0; i < MAX_NODES; i++)
     parent[i] = -1;
-
   int queue[MAX_NODES];
   int front = 0, rear = 0;
   visited[start] = 1;
   queue[rear++] = start;
-
   int found = 0;
   while (front < rear)
   {
@@ -194,11 +205,11 @@ int BuildPath(int start, int goal, int *path, int maxLen)
       found = 1;
       break;
     }
-
     for (int i = 0; i < nodes[current].connectionCount; i++)
     {
       int next = nodes[current].connections[i];
-      if (!visited[next])
+      // Para ir de 'current' para 'next', a "pista" oposta ('next' para 'current') deve estar livre.
+      if (!visited[next] && currentTraffic->graph[next][current] == 0)
       {
         visited[next] = 1;
         parent[next] = current;
@@ -206,10 +217,8 @@ int BuildPath(int start, int goal, int *path, int maxLen)
       }
     }
   }
-
   if (!found)
     return -1;
-
   int temp[MAX_NODES];
   int len = 0;
   int cur = goal;
@@ -218,7 +227,6 @@ int BuildPath(int start, int goal, int *path, int maxLen)
     temp[len++] = cur;
     cur = parent[cur];
   }
-
   for (int i = 0; i < len; i++)
   {
     path[i] = temp[len - i - 1];
@@ -231,6 +239,7 @@ void CreateDefaultNetwork()
   nodeCount = 0;
   messageCount = 0;
   actionTop = -1;
+  memset(&busyNetwork, 0, sizeof(Network));
   AddNode(150, 400);
   AddNode(300, 350);
   AddNode(300, 650);
@@ -245,30 +254,34 @@ void CreateDefaultNetwork()
   ConnectNodes(3, 5);
 }
 
-// ================== MENSAGENS ASSÍNCRONAS (LÓGICA CENTRAL) ==================
-
 void AddAsyncMessage(int from, int to)
 {
   if (messageCount >= MAX_MESSAGES)
     return;
-
   AsyncMessage *m = &messages[messageCount];
+  m->pathLength = BuildPath(from, to, m->path, MAX_NODES, &busyNetwork);
+  if (m->pathLength <= 1)
+  {
+    printf("FALHA INICIAL: Nao ha caminho livre de %d para %d!\n", from, to);
+    return;
+  }
+  for (int i = 0; i < m->pathLength - 1; i++)
+  {
+    int nodeA = m->path[i];
+    int nodeB = m->path[i + 1];
+    busyNetwork.graph[nodeA][nodeB]++;
+  }
   m->from = from;
   m->to = to;
   m->state = SENDING;
   m->progress = 0;
   m->currentSegment = 0;
-
-  m->pathLength = BuildPath(from, to, m->path, MAX_NODES);
-  if (m->pathLength <= 1)
-  {
-    printf("Caminho inválido de %d para %d!\n", from, to);
-    return;
-  }
-
+  m->ackPathLength = 0;
+  m->queuedAtNodeId = -1;
   messageCount++;
 }
-
+// ALTERADO: Lógica de atualização completamente refeita para corrigir o bug de "vazamento de recursos".
+// Agora os caminhos são liberados corretamente ao final de cada etapa.
 void UpdateAsyncMessages(float dt)
 {
   for (int i = 0; i < messageCount; i++)
@@ -277,109 +290,175 @@ void UpdateAsyncMessages(float dt)
     if (m->state == DONE)
       continue;
 
+    // 1. LÓGICA PARA MENSAGENS NA FILA (TENTATIVA DE SAÍDA)
+    if (m->state == QUEUED)
+    {
+      int nextHopNode = -1;
+      // Determina o próximo salto se for uma msg de ida ou um ACK na fila
+      if (m->ackPathLength > 0)
+      {                        // É um ACK que está na fila
+        nextHopNode = m->from; // O destino final de um ACK é a origem da msg
+      }
+      else
+      { // É uma mensagem de ida
+        nextHopNode = m->path[m->currentSegment + 1];
+      }
+
+      int tempPath[MAX_NODES];
+      int pathLen = BuildPath(m->queuedAtNodeId, nextHopNode, tempPath, MAX_NODES, &busyNetwork);
+
+      if (pathLen > 1)
+      {
+        // Caminho encontrado! Sai da fila.
+        printf("Mensagem %d saindo da fila no no %d.\n", i, m->queuedAtNodeId);
+        m->state = (m->ackPathLength > 0) ? ACK_RECEIVING : SENDING;
+        m->queuedAtNodeId = -1;
+        m->progress = 0;
+
+        // Reserva o primeiro segmento do novo caminho encontrado
+        busyNetwork.graph[tempPath[0]][tempPath[1]]++;
+      }
+      continue; // Pula para a próxima mensagem
+    }
+
+    // 2. LÓGICA PARA MENSAGENS EM TRÂNSITO
     m->progress += dt * MESSAGE_SPEED;
 
     if (m->progress >= 1.0f)
     {
-      m->progress = 0;
+      m->progress -= 1.0f; // Usar -= para manter o progresso "que sobrou"
 
       if (m->state == SENDING)
       {
         m->currentSegment++;
-        if (m->currentSegment >= m->pathLength - 1)
+        int currentNodeId = m->path[m->currentSegment];
+
+        // Chegou ao destino final?
+        if (currentNodeId == m->to)
         {
-          if ((float)rand() / RAND_MAX < PROB_SUCCESS)
+          // Libera o caminho de IDA que acabou de ser usado
+          for (int j = 0; j < m->pathLength - 1; j++)
           {
+            int nodeA = m->path[j];
+            int nodeB = m->path[j + 1];
+            if (busyNetwork.graph[nodeA][nodeB] > 0)
+              busyNetwork.graph[nodeA][nodeB]--;
+          }
+
+          // Tenta encontrar um caminho de volta para o ACK
+          m->ackPathLength = BuildPath(m->to, m->from, m->ackPath, MAX_NODES, &busyNetwork);
+          if (m->ackPathLength > 1)
+          {
+            for (int j = 0; j < m->ackPathLength - 1; j++)
+              busyNetwork.graph[m->ackPath[j]][m->ackPath[j + 1]]++; // Reserva caminho do ACK
             m->state = ACK_RECEIVING;
-            m->ackSegment = m->pathLength - 2;
+            m->currentAckSegment = 0;
           }
           else
-          {
-            m->currentSegment = 0;
+          { // Não achou caminho, fica na fila no destino
+            m->state = QUEUED;
+            m->queuedAtNodeId = m->to;
+            printf("Mensagem %d enfileirada no destino %d (sem rota de ACK).\n", i, m->to);
           }
         }
       }
       else if (m->state == ACK_RECEIVING)
       {
-        m->ackSegment--;
-        if (m->ackSegment < 0)
+        m->currentAckSegment++;
+        int currentNodeId = m->ackPath[m->currentAckSegment];
+
+        // ACK chegou na origem?
+        if (currentNodeId == m->from)
         {
-          if ((float)rand() / RAND_MAX < PROB_SUCCESS)
+          // Libera o caminho de VOLTA (ACK) que acabou de ser usado
+          for (int j = 0; j < m->ackPathLength - 1; j++)
           {
-            m->state = DONE;
+            int nodeA = m->ackPath[j];
+            int nodeB = m->ackPath[j + 1];
+            if (busyNetwork.graph[nodeA][nodeB] > 0)
+              busyNetwork.graph[nodeA][nodeB]--;
           }
-          else
-          {
-            m->state = SENDING;
-            m->currentSegment = 0;
-          }
+          m->state = DONE; // Fim da transação
         }
       }
     }
   }
 }
 
-void DrawAsyncMessages()
+void DrawTravelingMessages()
 {
   for (int i = 0; i < messageCount; i++)
   {
     AsyncMessage *m = &messages[i];
-    if (m->state == DONE)
+    if (m->state != SENDING && m->state != ACK_RECEIVING)
       continue;
 
     Vector2 start, end, pos;
     Color color;
-
     if (m->state == SENDING)
     {
-      int a = m->path[m->currentSegment];
-      int b = m->path[m->currentSegment + 1];
-      start = (Vector2){nodes[a].x, nodes[a].y};
-      end = (Vector2){nodes[b].x, nodes[b].y};
+      start = (Vector2){nodes[m->path[m->currentSegment]].x, nodes[m->path[m->currentSegment]].y};
+      end = (Vector2){nodes[m->path[m->currentSegment + 1]].x, nodes[m->path[m->currentSegment + 1]].y};
       color = RED;
     }
-    else // ACK_RECEIVING
+    else
     {
-      int a = m->path[m->ackSegment + 1];
-      int b = m->path[m->ackSegment];
-      start = (Vector2){nodes[a].x, nodes[a].y};
-      end = (Vector2){nodes[b].x, nodes[b].y};
+      start = (Vector2){nodes[m->ackPath[m->currentAckSegment]].x, nodes[m->ackPath[m->currentAckSegment]].y};
+      end = (Vector2){nodes[m->ackPath[m->currentAckSegment + 1]].x, nodes[m->ackPath[m->currentAckSegment + 1]].y};
       color = GREEN;
     }
-
-    pos = (Vector2){
-        start.x + (end.x - start.x) * m->progress,
-        start.y + (end.y - start.y) * m->progress};
+    pos = (Vector2){start.x + (end.x - start.x) * m->progress, start.y + (end.y - start.y) * m->progress};
     DrawCircleV(pos, 8, color);
+    DrawCircleLines(pos.x, pos.y, 8, BLACK); // Borda preta
   }
 }
 
-// ================== INTERFACE E LOOP PRINCIPAL ==================
+// NOVA FUNÇÃO para desenhar as mensagens na fila
+void DrawQueuedMessages()
+{
+  int queueCounts[MAX_NODES] = {0}; // Zera o contador de fila para cada nó
+  for (int i = 0; i < messageCount; i++)
+  {
+    AsyncMessage *m = &messages[i];
+    if (m->state == QUEUED)
+    {
+      int nodeId = m->queuedAtNodeId;
+      if (nodeId != -1)
+      {
+        Node *node = &nodes[nodeId];
+        Vector2 pos = {
+            node->x + QUEUE_OFFSET_X,
+            node->y - (NODE_RADIUS) + (queueCounts[nodeId] * QUEUE_OFFSET_Y)};
 
-// A função agora recebe a área que ela deve ocupar
+        // Determina a cor (vermelho se indo, verde se era um ACK)
+        Color color = (m->ackPathLength > 0) ? GREEN : RED;
+
+        DrawCircleV(pos, 7, color);
+        DrawCircleLines(pos.x, pos.y, 7, BLACK); // Borda preta
+
+        queueCounts[nodeId]++; // Incrementa a posição na pilha para este nó
+      }
+    }
+  }
+}
+
 void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, bool *sendPressed)
 {
   static char fromText[8] = "0";
-  static char toText[8] = "1";
-  static char msgText[8] = "1";
+  static char toText[8] = "3";
+  static char msgText[8] = "20";
   static int activeBox = -1;
-
-  // Desenha o fundo e a borda da UI
   DrawRectangleRec(uiArea, (Color){200, 200, 200, 180});
   DrawRectangleLinesEx(uiArea, 2, DARKGRAY);
-
   int startX = uiArea.x + 10;
   int startY = uiArea.y + 10;
   int boxW = 60, boxH = 30, spacing = 40;
-
   DrawText("Origem:", startX, startY, 20, DARKGRAY);
   DrawText("Destino:", startX, startY + spacing, 20, DARKGRAY);
-  DrawText("Qtd Msgs:", startX, startY + 2 * spacing, 20, DARKGRAY);
-
+  DrawText("Qtd:", startX, startY + 2 * spacing, 20, DARKGRAY);
   Rectangle boxFrom = {startX + 100, startY, boxW, boxH};
   Rectangle boxTo = {startX + 100, startY + spacing, boxW, boxH};
   Rectangle boxMsg = {startX + 100, startY + 2 * spacing, boxW, boxH};
-
   if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
   {
     if (CheckCollisionPointRec(GetMousePosition(), boxFrom))
@@ -391,7 +470,6 @@ void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, b
     else if (!CheckCollisionPointRec(GetMousePosition(), uiArea))
       activeBox = -1;
   }
-
   if (activeBox != -1)
   {
     char *target = NULL;
@@ -401,7 +479,6 @@ void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, b
       target = toText;
     if (activeBox == 2)
       target = msgText;
-
     SetMouseCursor(MOUSE_CURSOR_IBEAM);
     int key = GetCharPressed();
     while (key > 0)
@@ -425,19 +502,16 @@ void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, b
   {
     SetMouseCursor(MOUSE_CURSOR_DEFAULT);
   }
-
   DrawRectangleLinesEx(boxFrom, 2, (activeBox == 0) ? RED : DARKGRAY);
   DrawText(fromText, boxFrom.x + 5, boxFrom.y + 5, 20, BLACK);
   DrawRectangleLinesEx(boxTo, 2, (activeBox == 1) ? RED : DARKGRAY);
   DrawText(toText, boxTo.x + 5, boxTo.y + 5, 20, BLACK);
   DrawRectangleLinesEx(boxMsg, 2, (activeBox == 2) ? RED : DARKGRAY);
   DrawText(msgText, boxMsg.x + 5, boxMsg.y + 5, 20, BLACK);
-
   Rectangle btn = {startX, startY + 3 * spacing, boxW + 100, boxH};
   DrawRectangleRec(btn, LIGHTGRAY);
   DrawRectangleLinesEx(btn, 2, DARKGRAY);
-  DrawText("Enviar Mensagens", btn.x + 10, btn.y + 5, 20, BLACK);
-
+  DrawText("Enviar", btn.x + 10, btn.y + 5, 20, BLACK);
   if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON) && CheckCollisionPointRec(GetMousePosition(), btn))
   {
     *uiFromNode = atoi(fromText);
@@ -449,55 +523,41 @@ void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, b
 
 int main(void)
 {
-  InitWindow(1280, 720, "Simulador de Rede Assíncrono");
+  InitWindow(1280, 720, "Simulador de Rede com Fila nos Nos");
   SetTargetFPS(60);
   srand(time(NULL));
 
-  // Variáveis para a UI
-  int uiFromNode = 0, uiToNode = 1, uiMsgCount = 1;
+  memset(&busyNetwork, 0, sizeof(Network));
+  int uiFromNode = 0, uiToNode = 3, uiMsgCount = 5;
   bool sendPressed = false;
-
-  // Variáveis para o sistema de envio escalonado
   int messagesToSend = 0;
   float messageSendTimer = 0.0f;
-  int messageFromNode = -1;
-  int messageToNode = -1;
-
-  // Variável para conexão de nós
+  int messageFromNode = -1, messageToNode = -1;
   int nodeToConnect = -1;
 
   while (!WindowShouldClose())
   {
     Vector2 mouse = GetMousePosition();
     float dt = GetFrameTime();
-
-    // FIX 1: Calcular a área da UI ANTES de processar o input.
     int screenW = GetScreenWidth();
     int boxW = 60, spacing = 40, boxH = 30;
     Rectangle uiArea = {screenW - boxW - 120 - 20, 10, boxW + 120 + 20, 3 * spacing + boxH + 20};
 
-    // --- LÓGICA DE ATUALIZAÇÃO ---
-
-    // FIX 2: Lógica para enviar mensagens em lote de forma escalonada
     if (sendPressed)
     {
-      sendPressed = false; // Apenas rearma o gatilho
-      // Inicia a fila de envio
+      sendPressed = false;
       messagesToSend = uiMsgCount;
       messageFromNode = uiFromNode;
       messageToNode = uiToNode;
-      messageSendTimer = 0.0f; // Zera o timer para enviar a primeira imediatamente
+      messageSendTimer = MESSAGE_INTERVAL;
     }
-
     if (messagesToSend > 0)
     {
       messageSendTimer += dt;
       if (messageSendTimer >= MESSAGE_INTERVAL)
       {
         if (messageFromNode != messageToNode && messageFromNode < nodeCount && messageToNode < nodeCount)
-        {
           AddAsyncMessage(messageFromNode, messageToNode);
-        }
         messagesToSend--;
         messageSendTimer = 0.0f;
       }
@@ -505,30 +565,23 @@ int main(void)
 
     UpdateAsyncMessages(dt);
 
-    // --- LÓGICA DE ENTRADA (INPUT) ---
-
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
     {
-      // Agora a verificação funciona, pois uiArea já foi calculada.
       if (!CheckCollisionPointRec(mouse, uiArea))
       {
         AddNode(mouse.x, mouse.y);
         PushAction(ACTION_ADD_NODE, nodeCount - 1, -1);
       }
     }
-
     if (IsMouseButtonPressed(MOUSE_RIGHT_BUTTON))
     {
       int clickedNode = -1;
       for (int i = 0; i < nodeCount; i++)
-      {
         if (CheckCollisionPointCircle(mouse, (Vector2){nodes[i].x, nodes[i].y}, NODE_RADIUS))
         {
           clickedNode = i;
           break;
         }
-      }
-
       if (clickedNode != -1)
       {
         if (nodeToConnect == -1)
@@ -547,7 +600,7 @@ int main(void)
       }
       else
       {
-        nodeToConnect = -1; // Clicar fora de um nó cancela a conexão
+        nodeToConnect = -1;
       }
     }
 
@@ -558,15 +611,13 @@ int main(void)
     if (IsKeyPressed(KEY_W))
       nodeToConnect = -1;
 
-    // --- SEÇÃO DE DESENHO ---
-
     BeginDrawing();
     ClearBackground(RAYWHITE);
 
     DrawNetwork();
-    DrawAsyncMessages();
+    DrawTravelingMessages();
+    DrawQueuedMessages(); // Desenha as mensagens na fila
 
-    // Passa a área da UI para a função de desenho
     DrawUI(uiArea, &uiFromNode, &uiToNode, &uiMsgCount, &sendPressed);
 
     DrawText("ESQ: Adicionar | DIR: Conectar", 10, 10, 20, DARKGRAY);
