@@ -9,7 +9,7 @@
 #define MAX_NODES 50
 #define NODE_RADIUS 20
 #define MAX_CONNECTIONS 10
-#define MAX_MESSAGES 100000
+#define MAX_MESSAGES 1000000
 #define MESSAGE_SPEED 1.5f
 #define MESSAGE_INTERVAL 0.2f
 #define QUEUE_OFFSET_X 25 // Distância X do nó para a fila
@@ -233,158 +233,243 @@ int BuildPath(int start, int goal, int *path, int maxLen, Network *currentTraffi
   }
   return len;
 }
-
 void CreateDefaultNetwork()
 {
+  // Reseta o estado da rede
   nodeCount = 0;
   messageCount = 0;
   actionTop = -1;
   memset(&busyNetwork, 0, sizeof(Network));
-  AddNode(150, 400);
-  AddNode(300, 350);
-  AddNode(300, 650);
-  AddNode(450, 400);
-  AddNode(600, 350);
-  AddNode(600, 650);
+
+  // --- Adiciona 14 Nós em Posições Estratégicas ---
+
+  // Hub Central e Anel Interno
+  AddNode(450, 360); // Nó 0 (Hub Central)
+  AddNode(300, 200); // Nó 1
+  AddNode(300, 520); // Nó 2
+  AddNode(600, 200); // Nó 3
+  AddNode(600, 520); // Nó 4
+
+  // Cluster da Esquerda
+  AddNode(120, 120); // Nó 5
+  AddNode(120, 360); // Nó 6
+  AddNode(120, 600); // Nó 7
+
+  // Cluster da Direita
+  AddNode(780, 120); // Nó 8
+  AddNode(780, 360); // Nó 9
+  AddNode(780, 600); // Nó 10
+
+  // Nós Externos (Topo, Baixo, Extrema Direita)
+  AddNode(450, 50);  // Nó 11 (Topo)
+  AddNode(450, 670); // Nó 12 (Baixo)
+  AddNode(950, 360); // Nó 13 (Extrema Direita)
+
+  // --- Cria as Conexões para Formar a Topologia ---
+
+  // Conexões do Hub Central (Nó 0)
   ConnectNodes(0, 1);
   ConnectNodes(0, 2);
-  ConnectNodes(1, 3);
-  ConnectNodes(2, 3);
-  ConnectNodes(3, 4);
-  ConnectNodes(3, 5);
+  ConnectNodes(0, 3);
+  ConnectNodes(0, 4);
+
+  // Conexões do Anel Interno
+  ConnectNodes(1, 2);
+  ConnectNodes(2, 4);
+  ConnectNodes(4, 3);
+  ConnectNodes(3, 1);
+
+  // Conectando o Cluster da Esquerda ao Anel
+  ConnectNodes(1, 5);
+  ConnectNodes(1, 6);
+  ConnectNodes(2, 6);
+  ConnectNodes(2, 7);
+  ConnectNodes(5, 6); // Conexão local do cluster
+  ConnectNodes(6, 7); // Conexão local do cluster
+
+  // Conectando o Cluster da Direita ao Anel
+  ConnectNodes(3, 8);
+  ConnectNodes(3, 9);
+  ConnectNodes(4, 9);
+  ConnectNodes(4, 10);
+  ConnectNodes(8, 9);  // Conexão local do cluster
+  ConnectNodes(9, 10); // Conexão local do cluster
+
+  // Conectando os Nós Externos
+  ConnectNodes(11, 1);
+  ConnectNodes(11, 3);
+  ConnectNodes(12, 2);
+  ConnectNodes(12, 4);
+  ConnectNodes(13, 9);
 }
 
 void AddAsyncMessage(int from, int to)
 {
   if (messageCount >= MAX_MESSAGES)
     return;
-  AsyncMessage *m = &messages[messageCount];
-  m->pathLength = BuildPath(from, to, m->path, MAX_NODES, &busyNetwork);
-  if (m->pathLength <= 1)
+
+  // --- LÓGICA PROATIVA ---
+  // 1. Primeiro, tentamos encontrar o caminho de IDA.
+  int pathLength = BuildPath(from, to, messages[messageCount].path, MAX_NODES, &busyNetwork);
+  if (pathLength <= 1)
   {
-    printf("FALHA INICIAL: Nao ha caminho livre de %d para %d!\n", from, to);
+    printf("FALHA PROATIVA (IDA): Nao ha caminho livre de %d para %d.\n", from, to);
     return;
   }
+
+  // 2. Antes de confirmar, verificamos se já existe um caminho de VOLTA (para o futuro ACK).
+  int tempAckPath[MAX_NODES]; // Caminho temporário apenas para verificação
+  int ackPathLength = BuildPath(to, from, tempAckPath, MAX_NODES, &busyNetwork);
+  if (ackPathLength <= 1)
+  {
+    printf("FALHA PROATIVA (VOLTA): Rota de %d->%d encontrada, mas nao ha rota de retorno de %d->%d para o ACK. Envio cancelado para evitar fila.\n", from, to, to, from);
+    return; // **PONTO CRÍTICO**: Se não há como voltar, a mensagem não é nem enviada.
+  }
+
+  // 3. Se ambos os caminhos (ida e um potencial de volta) existem, confirmamos o envio.
+  AsyncMessage *m = &messages[messageCount];
+  m->pathLength = pathLength; // Já calculamos, agora só atribuímos.
+
+  // Reserva o caminho de IDA na rede.
   for (int i = 0; i < m->pathLength - 1; i++)
   {
     int nodeA = m->path[i];
     int nodeB = m->path[i + 1];
     busyNetwork.graph[nodeA][nodeB]++;
   }
+
   m->from = from;
   m->to = to;
   m->state = SENDING;
   m->progress = 0;
   m->currentSegment = 0;
-  m->ackPathLength = 0;
+  m->ackPathLength = 0; // O caminho do ACK só será definido na chegada.
   m->queuedAtNodeId = -1;
   messageCount++;
+  printf("Msg %d enviada de %d para %d. Rota de retorno para ACK verificada.\n", messageCount - 1, from, to);
 }
 // ALTERADO: Lógica de atualização completamente refeita para corrigir o bug de "vazamento de recursos".
 // Agora os caminhos são liberados corretamente ao final de cada etapa.
-void UpdateAsyncMessages(float dt)
+// ALTERADO: Lógica de atualização completamente refeita para ser mais robusta e corrigir o bug da fila.
+// ALTERADO: Lógica de atualização com mecanismo de "justiça" para evitar que uma
+// mensagem bloqueie todas as outras na fila no mesmo quadro.
+// NOVA FUNÇÃO para depuração: Imprime o estado de todas as mensagens que não foram concluídas.
+void PrintNonCompletedMessages()
 {
+
+  
+}
+// NOVO: Variável estática para implementar o Round-Robin.
+// Guarda o índice da PRÓXIMA mensagem que o nó deve tentar liberar.
+// Variável estática para implementar o Round-Robin.
+// Guarda o índice da PRÓXIMA mensagem que o nó deve tentar liberar.
+// Variáveis estáticas para controle de fila e cooldown
+static int nextMessageToTry[MAX_NODES] = {0};
+static float nodeReleaseCooldown[MAX_NODES] = {0.0f};
+
+void UpdateAsyncMessages(float dt, float releaseInterval)
+{
+  PrintNonCompletedMessages();
+
+  // Diminui o cooldown de todos os nós a cada quadro.
+  for (int i = 0; i < nodeCount; i++)
+  {
+    if (nodeReleaseCooldown[i] > 0)
+    {
+      nodeReleaseCooldown[i] -= dt;
+    }
+  }
+
+  // --- LOOP DE ATUALIZAÇÃO UNIFICADO ---
   for (int i = 0; i < messageCount; i++)
   {
     AsyncMessage *m = &messages[i];
-    if (m->state == DONE)
-      continue;
 
-    // 1. LÓGICA PARA MENSAGENS NA FILA (TENTATIVA DE SAÍDA)
-    if (m->state == QUEUED)
+    // O progresso de tempo é aplicado a mensagens em movimento
+    if (m->state == SENDING || m->state == ACK_RECEIVING)
     {
-      int nextHopNode = -1;
-      // Determina o próximo salto se for uma msg de ida ou um ACK na fila
-      if (m->ackPathLength > 0)
-      {                        // É um ACK que está na fila
-        nextHopNode = m->from; // O destino final de um ACK é a origem da msg
-      }
-      else
-      { // É uma mensagem de ida
-        nextHopNode = m->path[m->currentSegment + 1];
-      }
-
-      int tempPath[MAX_NODES];
-      int pathLen = BuildPath(m->queuedAtNodeId, nextHopNode, tempPath, MAX_NODES, &busyNetwork);
-
-      if (pathLen > 1)
-      {
-        // Caminho encontrado! Sai da fila.
-        printf("Mensagem %d saindo da fila no no %d.\n", i, m->queuedAtNodeId);
-        m->state = (m->ackPathLength > 0) ? ACK_RECEIVING : SENDING;
-        m->queuedAtNodeId = -1;
-        m->progress = 0;
-
-        // Reserva o primeiro segmento do novo caminho encontrado
-        busyNetwork.graph[tempPath[0]][tempPath[1]]++;
-      }
-      continue; // Pula para a próxima mensagem
+      m->progress += dt * MESSAGE_SPEED;
     }
 
-    // 2. LÓGICA PARA MENSAGENS EM TRÂNSITO
-    m->progress += dt * MESSAGE_SPEED;
-
-    if (m->progress >= 1.0f)
+    // Máquina de estados para cada mensagem
+    switch (m->state)
     {
-      m->progress -= 1.0f; // Usar -= para manter o progresso "que sobrou"
-
-      if (m->state == SENDING)
+    case SENDING:
+      if (m->progress >= 1.0f)
       {
+        m->progress -= 1.0f;
         m->currentSegment++;
         int currentNodeId = m->path[m->currentSegment];
 
-        // Chegou ao destino final?
-        if (currentNodeId == m->to)
+        if (currentNodeId == m->to) // Chegou ao destino
         {
-          // Libera o caminho de IDA que acabou de ser usado
           for (int j = 0; j < m->pathLength - 1; j++)
           {
-            int nodeA = m->path[j];
-            int nodeB = m->path[j + 1];
-            if (busyNetwork.graph[nodeA][nodeB] > 0)
-              busyNetwork.graph[nodeA][nodeB]--;
+            if (busyNetwork.graph[m->path[j]][m->path[j + 1]] > 0)
+              busyNetwork.graph[m->path[j]][m->path[j + 1]]--;
           }
-
-          // Tenta encontrar um caminho de volta para o ACK
-          m->ackPathLength = BuildPath(m->to, m->from, m->ackPath, MAX_NODES, &busyNetwork);
-          if (m->ackPathLength > 1)
-          {
-            for (int j = 0; j < m->ackPathLength - 1; j++)
-              busyNetwork.graph[m->ackPath[j]][m->ackPath[j + 1]]++; // Reserva caminho do ACK
-            m->state = ACK_RECEIVING;
-            m->currentAckSegment = 0;
-          }
-          else
-          { // Não achou caminho, fica na fila no destino
-            m->state = QUEUED;
-            m->queuedAtNodeId = m->to;
-            printf("Mensagem %d enfileirada no destino %d (sem rota de ACK).\n", i, m->to);
-          }
+          m->pathLength = 0;
+          m->state = QUEUED;
+          m->queuedAtNodeId = m->to;
+          printf("Msg %d chegou ao destino %d e foi para a fila de ACK.\n", i, m->to);
         }
       }
-      else if (m->state == ACK_RECEIVING)
+      break;
+
+    case ACK_RECEIVING:
+      if (m->progress >= 1.0f)
       {
+        m->progress -= 1.0f;
         m->currentAckSegment++;
         int currentNodeId = m->ackPath[m->currentAckSegment];
 
-        // ACK chegou na origem?
-        if (currentNodeId == m->from)
+        if (currentNodeId == m->from) // ACK chegou à origem
         {
-          // Libera o caminho de VOLTA (ACK) que acabou de ser usado
           for (int j = 0; j < m->ackPathLength - 1; j++)
           {
-            int nodeA = m->ackPath[j];
-            int nodeB = m->ackPath[j + 1];
-            if (busyNetwork.graph[nodeA][nodeB] > 0)
-              busyNetwork.graph[nodeA][nodeB]--;
+            if (busyNetwork.graph[m->ackPath[j]][m->ackPath[j + 1]] > 0)
+              busyNetwork.graph[m->ackPath[j]][m->ackPath[j + 1]]--;
           }
-          m->state = DONE; // Fim da transação
+          m->state = DONE;
+          printf("Msg %d CONCLUIDA (ACK recebido).\n", i);
         }
       }
+      break;
+
+    case QUEUED:
+    {
+      int nodeId = m->queuedAtNodeId;
+      if (nodeId != -1 && nodeReleaseCooldown[nodeId] <= 0)
+      {
+        // Tenta encontrar um caminho de volta para o ACK
+        m->ackPathLength = BuildPath(m->to, m->from, m->ackPath, MAX_NODES, &busyNetwork);
+        if (m->ackPathLength > 1)
+        {
+          // Sucesso! Configura a mensagem para o estado de ACK
+          for (int j = 0; j < m->ackPathLength - 1; j++)
+          {
+            busyNetwork.graph[m->ackPath[j]][m->ackPath[j + 1]]++;
+          }
+          m->state = ACK_RECEIVING;
+          m->progress = 0;
+          m->currentAckSegment = 0;
+          m->queuedAtNodeId = -1;
+
+          // Ativa o cooldown para este nó
+          nodeReleaseCooldown[nodeId] = releaseInterval;
+
+          printf("Msg %d saiu da fila do no %d (ACK).\n", i, nodeId);
+        }
+      }
+      break;
+    }
+
+    case DONE:
+      // Nenhuma ação necessária
+      break;
     }
   }
 }
-
 void DrawTravelingMessages()
 {
   for (int i = 0; i < messageCount; i++)
@@ -413,40 +498,86 @@ void DrawTravelingMessages()
   }
 }
 
-// NOVA FUNÇÃO para desenhar as mensagens na fila
+// ALTERADO: A função agora conta as mensagens na fila e desenha um único
+// indicador com um contador, em vez de uma pilha de mensagens.
 void DrawQueuedMessages()
 {
-  int queueCounts[MAX_NODES] = {0}; // Zera o contador de fila para cada nó
+  // 1. Primeiro, contamos quantas mensagens estão na fila de cada nó.
+  int queueCounts[MAX_NODES] = {0};
   for (int i = 0; i < messageCount; i++)
   {
-    AsyncMessage *m = &messages[i];
-    if (m->state == QUEUED)
+    if (messages[i].state == QUEUED && messages[i].queuedAtNodeId != -1)
     {
-      int nodeId = m->queuedAtNodeId;
-      if (nodeId != -1)
-      {
-        Node *node = &nodes[nodeId];
-        Vector2 pos = {
-            node->x + QUEUE_OFFSET_X,
-            node->y - (NODE_RADIUS) + (queueCounts[nodeId] * QUEUE_OFFSET_Y)};
-
-        // Determina a cor (vermelho se indo, verde se era um ACK)
-        Color color = (m->ackPathLength > 0) ? GREEN : RED;
-
-        DrawCircleV(pos, 7, color);
-        DrawCircleLines(pos.x, pos.y, 7, BLACK); // Borda preta
-
-        queueCounts[nodeId]++; // Incrementa a posição na pilha para este nó
-      }
+      queueCounts[messages[i].queuedAtNodeId]++;
     }
+  }
+
+  // 2. Agora, desenhamos um indicador para cada nó que tiver uma fila.
+  for (int nodeId = 0; nodeId < nodeCount; nodeId++)
+  {
+    if (queueCounts[nodeId] > 0)
+    {
+      Node *node = &nodes[nodeId];
+
+      // Posição do indicador visual da fila
+      Vector2 pos = {node->x + QUEUE_OFFSET_X + 10, node->y - NODE_RADIUS};
+
+      // CORRIGIDO: Uma mensagem enfileirada no destino está esperando para
+      // se tornar um ACK, então a cor correta é VERDE.
+      Color color = GREEN;
+
+      // Desenha o círculo que representa a fila
+      DrawCircleV(pos, 8, color);
+      DrawCircleLines(pos.x, pos.y, 8, BLACK);
+
+      // Prepara e desenha o texto com o número de mensagens na fila
+      char countText[16];
+      sprintf(countText, "%d", queueCounts[nodeId]);
+      DrawText(countText, pos.x + 12, pos.y - 8, 20, BLACK);
+    }
+  }
+}
+
+// NOVO: Função para criar uma rajada de tráfego predefinida
+// NOVO: Esta função envia apenas UMA rodada de mensagens da rajada.
+// ALTERADO: A função agora envia uma rodada de fluxos com origens e destinos aleatórios.
+void SendOneBurstRound()
+{
+  // Define quantos fluxos de mensagens queremos criar a cada rodada do burst.
+  const int streamsPerRound = 5;
+
+  // printf(" -> Gerando %d fluxos aleatórios para a rajada...\n", streamsPerRound);
+
+  for (int i = 0; i < streamsPerRound; i++)
+  {
+    // Garante que haja nós na rede para evitar divisão por zero.
+    if (nodeCount == 0)
+      continue;
+
+    // Escolhe um nó de origem aleatório.
+    int from = rand() % nodeCount;
+
+    // Escolhe um nó de destino aleatório.
+    int to = rand() % nodeCount;
+
+    // Garante que um nó não envie uma mensagem para si mesmo.
+    while (from == to)
+    {
+      to = rand() % nodeCount;
+    }
+
+    // Adiciona a mensagem com o caminho aleatório ao sistema.
+    AddAsyncMessage(from, to);
+    // Opcional: Descomente a linha abaixo para ver no console os caminhos gerados.
+    // printf("      - Fluxo aleatório criado: %d -> %d\n", from, to);
   }
 }
 
 void DrawUI(Rectangle uiArea, int *uiFromNode, int *uiToNode, int *uiMsgCount, bool *sendPressed)
 {
   static char fromText[8] = "0";
-  static char toText[8] = "3";
-  static char msgText[8] = "20";
+  static char toText[8] = "4";
+  static char msgText[8] = "2";
   static int activeBox = -1;
   DrawRectangleRec(uiArea, (Color){200, 200, 200, 180});
   DrawRectangleLinesEx(uiArea, 2, DARKGRAY);
@@ -563,7 +694,7 @@ int main(void)
       }
     }
 
-    UpdateAsyncMessages(dt);
+    UpdateAsyncMessages(dt, dt*10);
 
     if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
     {
@@ -629,7 +760,26 @@ int main(void)
       DrawText(buffer, 10, 70, 20, RED);
       DrawLine(nodes[nodeToConnect].x, nodes[nodeToConnect].y, mouse.x, mouse.y, DARKGRAY);
     }
+    bool burstInProgress = false;
+    int burstRoundsSent = 0;
+    float burstTimer = 0.0f;
+    const int TOTAL_BURST_ROUNDS = 10;
+    if (IsKeyPressed(KEY_B)){ // NOVO: Gatilho para a rajada de tráfego
+      burstTimer += dt;
+      if (burstTimer >= dt) // Usa o mesmo intervalo da UI
+      {
+        SendOneBurstRound(); // Envia uma rodada de 5 fluxos
+        burstRoundsSent++;
+        burstTimer = 0.0f;
 
+        // Se todas as rodadas foram enviadas, termina o burst
+        if (burstRoundsSent >= TOTAL_BURST_ROUNDS)
+        {
+          burstInProgress = false;
+          printf("---[ RAJADA DE TRÁFEGO CONCLUÍDA ]---\n");
+        }
+      }
+  }
     EndDrawing();
   }
 
