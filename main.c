@@ -15,6 +15,10 @@
 #define QUEUE_OFFSET_X 25 // Distância X do nó para a fila
 #define QUEUE_OFFSET_Y 15 // Distância Y entre mensagens na fila
 
+int totalMessages;
+int sentMessages;
+int lostMessages;
+
 // NOVO: A struct Network será usada para rastrear o tráfego direcional
 typedef struct Network
 {
@@ -40,6 +44,7 @@ typedef enum MsgState
   ACK_RECEIVING,
   DONE,
   QUEUED,
+  
 } MsgState;
 
 // ALTERADO: A struct da mensagem precisa de um caminho separado para o ACK
@@ -58,7 +63,7 @@ typedef struct AsyncMessage
   int ackPath[MAX_NODES];
   int ackPathLength;
   int queuedAtNodeId;
-
+  clock_t lastSentTime;
 } AsyncMessage;
 
 AsyncMessage messages[MAX_MESSAGES];
@@ -261,7 +266,7 @@ void CreateDefaultNetwork()
   AddNode(780, 600); // Nó 10
 
   // Nós Externos (Topo, Baixo, Extrema Direita)
-  AddNode(450, 50);  // Nó 11 (Topo)
+
   AddNode(450, 670); // Nó 12 (Baixo)
   AddNode(950, 360); // Nó 13 (Extrema Direita)
 
@@ -300,7 +305,7 @@ void CreateDefaultNetwork()
   ConnectNodes(11, 3);
   ConnectNodes(12, 2);
   ConnectNodes(12, 4);
-  ConnectNodes(13, 9);
+
 }
 
 void AddAsyncMessage(int from, int to)
@@ -348,29 +353,28 @@ void AddAsyncMessage(int from, int to)
   messageCount++;
   printf("Msg %d enviada de %d para %d. Rota de retorno para ACK verificada.\n", messageCount - 1, from, to);
 }
-// ALTERADO: Lógica de atualização completamente refeita para corrigir o bug de "vazamento de recursos".
-// Agora os caminhos são liberados corretamente ao final de cada etapa.
-// ALTERADO: Lógica de atualização completamente refeita para ser mais robusta e corrigir o bug da fila.
-// ALTERADO: Lógica de atualização com mecanismo de "justiça" para evitar que uma
-// mensagem bloqueie todas as outras na fila no mesmo quadro.
-// NOVA FUNÇÃO para depuração: Imprime o estado de todas as mensagens que não foram concluídas.
+
 void PrintNonCompletedMessages()
 {
 
   
 }
-// NOVO: Variável estática para implementar o Round-Robin.
-// Guarda o índice da PRÓXIMA mensagem que o nó deve tentar liberar.
-// Variável estática para implementar o Round-Robin.
-// Guarda o índice da PRÓXIMA mensagem que o nó deve tentar liberar.
-// Variáveis estáticas para controle de fila e cooldown
+
+void ErrorMessages(){
+  for (int i = 0; i < messageCount; i++)
+  {
+    if(messages[i].state != DONE){
+      lostMessages++;
+    }
+  }
+}
+
 static int nextMessageToTry[MAX_NODES] = {0};
 static float nodeReleaseCooldown[MAX_NODES] = {0.0f};
 
 void UpdateAsyncMessages(float dt, float releaseInterval)
 {
-  PrintNonCompletedMessages();
-
+  clock_t now = clock();
   // Diminui o cooldown de todos os nós a cada quadro.
   for (int i = 0; i < nodeCount; i++)
   {
@@ -388,10 +392,11 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
     // O progresso de tempo é aplicado a mensagens em movimento
     if (m->state == SENDING || m->state == ACK_RECEIVING)
     {
+      double elapsedSeconds = (double)(now - m->lastSentTime) / CLOCKS_PER_SEC;
       m->progress += dt * MESSAGE_SPEED;
     }
 
-    // Máquina de estados para cada mensagem
+    
     switch (m->state)
     {
     case SENDING:
@@ -470,6 +475,7 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
     }
   }
 }
+
 void DrawTravelingMessages()
 {
   for (int i = 0; i < messageCount; i++)
@@ -544,7 +550,7 @@ void DrawQueuedMessages()
 void SendOneBurstRound()
 {
   // Define quantos fluxos de mensagens queremos criar a cada rodada do burst.
-  const int streamsPerRound = 5;
+  const int streamsPerRound = 10;
 
   // printf(" -> Gerando %d fluxos aleatórios para a rajada...\n", streamsPerRound);
 
@@ -750,9 +756,12 @@ int main(void)
     DrawQueuedMessages(); // Desenha as mensagens na fila
 
     DrawUI(uiArea, &uiFromNode, &uiToNode, &uiMsgCount, &sendPressed);
-
+    ErrorMessages();
     DrawText("ESQ: Adicionar | DIR: Conectar", 10, 10, 20, DARKGRAY);
     DrawText("Q: Rede Padrão | W: Limpar seleção | CTRL+Z: Desfazer", 10, 40, 20, DARKGRAY);
+    DrawText(TextFormat("Lost Messages: %02i", lostMessages), 10, 70, 20, DARKGRAY);
+    DrawText(TextFormat("Correct Messages: %02i", messageCount-lostMessages), 10, 90, 20, DARKGRAY);
+    lostMessages = 0;
     if (nodeToConnect != -1)
     {
       char buffer[64];
