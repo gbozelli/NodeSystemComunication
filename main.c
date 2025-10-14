@@ -16,8 +16,10 @@
 #define MESSAGE_INTERVAL 0.2f
 #define QUEUE_OFFSET_X 25
 
-#define MAX_CAPACITY_PER_LINK 20
-#define TIMEOUT_SECONDS 10.0f
+// --- PARÂMETROS DA SIMULAÇÃO (globais para serem alterados pela UI) ---
+int g_link_capacity = 20;
+float g_timeout_seconds = 10.0f;
+float g_prob_success = 1.0f; // 1.0f = 100% de sucesso no envio
 
 //====================================================================================
 // ESTRUTURAS DE DADOS
@@ -33,6 +35,7 @@ typedef struct Node
   int id;
   int connections[MAX_CONNECTIONS];
   int connectionCount;
+  bool enabled;
 } Node;
 typedef enum MsgState
 {
@@ -73,9 +76,8 @@ int nodeCount = 0;
 AsyncMessage messages[MAX_MESSAGES];
 int messageCount = 0;
 
-// --- DUAS REDES SEPARADAS PARA CONTROLE ---
-Network pathfindingNetwork; // Para BuildPath usar a regra da pista oposta == 0
-Network capacityNetwork;    // Para contar mensagens e checar capacidade
+Network pathfindingNetwork;
+Network capacityNetwork;
 
 Action actionStack[100];
 int actionTop = -1;
@@ -96,9 +98,11 @@ void PushAction(ActionType type, int a, int b)
     actionStack[actionTop] = (Action){type, a, b};
   }
 }
-
 void UndoAction()
 {
+  for(int i = 0; i < MAX_MESSAGES; i++){
+    messages[i] = (AsyncMessage){0};
+  }
   if (actionTop < 0)
     return;
   Action act = actionStack[actionTop--];
@@ -109,8 +113,7 @@ void UndoAction()
   }
   else if (act.type == ACTION_CONNECT_NODES)
   {
-    int a = act.nodeA;
-    int b = act.nodeB;
+    int a = act.nodeA, b = act.nodeB;
     for (int i = 0; i < nodes[a].connectionCount; i++)
     {
       if (nodes[a].connections[i] == b)
@@ -133,18 +136,13 @@ void UndoAction()
     }
   }
 }
-
 void AddNode(float x, float y)
 {
   if (nodeCount >= MAX_NODES)
     return;
-  nodes[nodeCount].id = nodeCount;
-  nodes[nodeCount].x = x;
-  nodes[nodeCount].y = y;
-  nodes[nodeCount].connectionCount = 0;
+  nodes[nodeCount] = (Node){x, y, nodeCount, .enabled = true};
   nodeCount++;
 }
-
 void ConnectNodes(int a, int b)
 {
   if (a < 0 || b < 0 || a >= nodeCount || b >= nodeCount || a == b)
@@ -164,8 +162,8 @@ void ConnectNodes(int a, int b)
   if (!exists)
     nodes[b].connections[nodes[b].connectionCount++] = a;
 }
-
-// Usa a 'pathfindingNetwork' com a regra estrita da pista oposta.
+// CORRIGIDO: Agora usa a ÚNICA rede de capacidade (capacityNetwork),
+// mas mantém a regra original de checar a pista oposta.
 int BuildPath(int start, int goal, int *path, int maxLen)
 {
   int visited[MAX_NODES] = {0};
@@ -173,9 +171,14 @@ int BuildPath(int start, int goal, int *path, int maxLen)
   for (int i = 0; i < MAX_NODES; i++)
     parent[i] = -1;
   int queue[MAX_NODES], front = 0, rear = 0;
+
+  if (start >= nodeCount || !nodes[start].enabled)
+    return -1;
+
   visited[start] = 1;
   queue[rear++] = start;
   int found = 0;
+
   while (front < rear)
   {
     int current = queue[front++];
@@ -187,7 +190,13 @@ int BuildPath(int start, int goal, int *path, int maxLen)
     for (int i = 0; i < nodes[current].connectionCount; i++)
     {
       int next = nodes[current].connections[i];
-      if (!visited[next] && pathfindingNetwork.graph[next][current] == 0)
+      if (!nodes[next].enabled)
+        continue;
+
+      // PONTO CRÍTICO DA CORREÇÃO:
+      // Checa a capacidade da PISTA OPOSTA na capacityNetwork.
+      // Se a pista oposta não estiver lotada, podemos planejar uma rota.
+      if (!visited[next] && capacityNetwork.graph[next][current] < g_link_capacity)
       {
         visited[next] = 1;
         parent[next] = current;
@@ -195,8 +204,10 @@ int BuildPath(int start, int goal, int *path, int maxLen)
       }
     }
   }
+
   if (!found)
     return -1;
+
   int temp[MAX_NODES], len = 0;
   int cur = goal;
   while (cur != -1)
@@ -210,7 +221,6 @@ int BuildPath(int start, int goal, int *path, int maxLen)
   }
   return len;
 }
-
 void CreateDefaultNetwork()
 {
   nodeCount = 0;
@@ -221,7 +231,6 @@ void CreateDefaultNetwork()
   total_latency_ticks = 0;
   completed_messages_count = 0;
   total_retransmissions = 0;
-
   AddNode(450, 360);
   AddNode(300, 200);
   AddNode(300, 520);
@@ -236,7 +245,6 @@ void CreateDefaultNetwork()
   AddNode(450, 50);
   AddNode(450, 670);
   AddNode(950, 360);
-
   ConnectNodes(0, 1);
   ConnectNodes(0, 2);
   ConnectNodes(0, 3);
@@ -269,17 +277,20 @@ void CreateDefaultNetwork()
 
 void AddAsyncMessage(int from, int to)
 {
+  if (((float)rand() / RAND_MAX) > g_prob_success)
+  {
+    return;
+  }
   if (messageCount >= MAX_MESSAGES)
     return;
   AsyncMessage *m = &messages[messageCount];
   *m = (AsyncMessage){.from = from, .to = to, .retransmission_count = 0, .creation_time = clock()};
 
   m->pathLength = BuildPath(from, to, m->path, MAX_NODES);
-
   if (m->pathLength > 1)
   {
     int first_hop_node = m->path[1];
-    if (capacityNetwork.graph[from][first_hop_node] < MAX_CAPACITY_PER_LINK)
+    if (capacityNetwork.graph[from][first_hop_node] < g_link_capacity)
     {
       m->state = SENDING;
       m->queuedAtNodeId = -1;
@@ -291,22 +302,27 @@ void AddAsyncMessage(int from, int to)
     {
       m->state = QUEUED;
       m->queuedAtNodeId = from;
+      m->last_sent_time = 0;
     }
   }
   else
   {
     m->state = QUEUED;
     m->queuedAtNodeId = from;
+    m->last_sent_time = 0;
   }
   messageCount++;
 }
 
+// VERSÃO FINAL CORRIGIDA: Lógica de timeout agora lida corretamente com mensagens que já estão na fila.
 void UpdateAsyncMessages(float dt, float releaseInterval)
 {
   static float nodeReleaseCooldown[MAX_NODES] = {0.0f};
   for (int i = 0; i < nodeCount; i++)
+  {
     if (nodeReleaseCooldown[i] > 0)
       nodeReleaseCooldown[i] -= dt;
+  }
   clock_t now = clock();
 
   for (int i = 0; i < messageCount; i++)
@@ -315,13 +331,18 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
     if (m->state == DONE)
       continue;
 
-    if ((m->state != QUEUED || m->queuedAtNodeId != m->from) && m->last_sent_time > 0)
+    // --- VERIFICAÇÃO DE TIMEOUT CORRIGIDA ---
+    // O timer só avança se a mensagem JÁ FOI ENVIADA (last_sent_time > 0).
+    // Mensagens na fila da origem (last_sent_time = 0) não sofrem timeout.
+    if (m->last_sent_time > 0)
     {
-      if (((double)(now - m->last_sent_time) / CLOCKS_PER_SEC) > TIMEOUT_SECONDS)
+      if (((double)(now - m->last_sent_time) / CLOCKS_PER_SEC) > g_timeout_seconds)
       {
-        printf("!!! TIMEOUT da Mensagem %d (%d->%d) !!!\n", i, m->from, m->to);
+        printf("!!! TIMEOUT da Mensagem %d (%d->%d) no estado %d!!!\n", i, m->from, m->to, m->state);
         total_retransmissions++;
 
+        // PONTO CRÍTICO: Libera recursos se a mensagem estava em trânsito.
+        // Se estava na fila, ela não estava ocupando um enlace, então não há o que liberar.
         if (m->state == SENDING)
         {
           int prevNode = m->path[m->currentSegment];
@@ -341,6 +362,7 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
             capacityNetwork.graph[prevNode][nextNode]--;
         }
 
+        // Reseta a mensagem para a fila da origem.
         m->state = QUEUED;
         m->queuedAtNodeId = m->from;
         m->retransmission_count++;
@@ -348,7 +370,9 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
         m->ackPathLength = 0;
         m->progress = 0;
         m->currentSegment = 0;
-        continue;
+        m->last_sent_time = 0; // ZERA o timer para pausá-lo até o reenvio.
+
+        continue; // Pula para a próxima mensagem.
       }
     }
 
@@ -364,10 +388,8 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
         int prevNodeId = m->path[m->currentSegment];
         m->currentSegment++;
         int currentNodeId = m->path[m->currentSegment];
-
         pathfindingNetwork.graph[prevNodeId][currentNodeId]--;
         capacityNetwork.graph[prevNodeId][currentNodeId]--;
-
         if (currentNodeId == m->to)
         {
           m->state = QUEUED;
@@ -376,7 +398,7 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
         else
         {
           int nextNodeId = m->path[m->currentSegment + 1];
-          if (capacityNetwork.graph[currentNodeId][nextNodeId] < MAX_CAPACITY_PER_LINK)
+          if (capacityNetwork.graph[currentNodeId][nextNodeId] < g_link_capacity)
           {
             pathfindingNetwork.graph[currentNodeId][nextNodeId]++;
             capacityNetwork.graph[currentNodeId][nextNodeId]++;
@@ -396,10 +418,8 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
         int prevNodeId = m->ackPath[m->currentAckSegment];
         m->currentAckSegment++;
         int currentNodeId = m->ackPath[m->currentAckSegment];
-
         pathfindingNetwork.graph[prevNodeId][currentNodeId]--;
         capacityNetwork.graph[prevNodeId][currentNodeId]--;
-
         if (currentNodeId == m->from)
         {
           m->state = DONE;
@@ -410,7 +430,7 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
         else
         {
           int nextNodeId = m->ackPath[m->currentAckSegment + 1];
-          if (capacityNetwork.graph[currentNodeId][nextNodeId] < MAX_CAPACITY_PER_LINK)
+          if (capacityNetwork.graph[currentNodeId][nextNodeId] < g_link_capacity)
           {
             pathfindingNetwork.graph[currentNodeId][nextNodeId]++;
             capacityNetwork.graph[currentNodeId][nextNodeId]++;
@@ -429,17 +449,18 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
       if (nodeId != -1 && nodeReleaseCooldown[nodeId] <= 0)
       {
         if (nodeId == m->from)
-        {
+        { // Na origem
           m->pathLength = BuildPath(m->from, m->to, m->path, MAX_NODES);
           if (m->pathLength > 1)
           {
             int nextNodeId = m->path[1];
-            if (capacityNetwork.graph[nodeId][nextNodeId] < MAX_CAPACITY_PER_LINK)
+            if (capacityNetwork.graph[nodeId][nextNodeId] < g_link_capacity)
             {
               m->state = SENDING;
               m->queuedAtNodeId = -1;
               m->last_sent_time = clock();
               m->progress = 0;
+              m->currentSegment = 0;
               pathfindingNetwork.graph[nodeId][nextNodeId]++;
               capacityNetwork.graph[nodeId][nextNodeId]++;
               nodeReleaseCooldown[nodeId] = releaseInterval;
@@ -447,12 +468,12 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
           }
         }
         else if (nodeId == m->to)
-        {
+        { // No destino (para ACK)
           m->ackPathLength = BuildPath(m->to, m->from, m->ackPath, MAX_NODES);
           if (m->ackPathLength > 1)
           {
             int nextNodeId = m->ackPath[1];
-            if (capacityNetwork.graph[nodeId][nextNodeId] < MAX_CAPACITY_PER_LINK)
+            if (capacityNetwork.graph[nodeId][nextNodeId] < g_link_capacity)
             {
               m->state = ACK_RECEIVING;
               m->currentAckSegment = 0;
@@ -465,9 +486,9 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
           }
         }
         else
-        {
+        { // Em nó intermediário
           int nextNodeId = (m->pathLength > 0) ? m->path[m->currentSegment + 1] : m->ackPath[m->currentAckSegment + 1];
-          if (capacityNetwork.graph[nodeId][nextNodeId] < MAX_CAPACITY_PER_LINK)
+          if (capacityNetwork.graph[nodeId][nextNodeId] < g_link_capacity)
           {
             m->state = (m->pathLength > 0) ? SENDING : ACK_RECEIVING;
             m->queuedAtNodeId = -1;
@@ -485,7 +506,6 @@ void UpdateAsyncMessages(float dt, float releaseInterval)
     }
   }
 }
-
 void SendOneBurstRound()
 {
   const int streamsPerRound = 10;
@@ -759,6 +779,110 @@ void DrawStatistics(int screenW)
   DrawText(TextFormat("Vazao: %.2f msg/s", throughput), statsArea.x + 10, statsArea.y + 130, 20, DARKGRAY);
 }
 
+// NOVA FUNÇÃO: Desenha e gerencia a UI para os parâmetros da simulação.
+void DrawParametersUI(int screenW, int *capacity, float *timeout, float *prob)
+{
+  // Buffers de texto estáticos para armazenar a entrada do usuário
+  static char capacityText[8] = "20";
+  static char timeoutText[8] = "10.0";
+  static char probText[8] = "1.0";
+  static int activeBox = -1; // -1: nenhum, 0: capacidade, 1: timeout, 2: prob
+
+  // Define a área do painel
+  Rectangle paramArea = {screenW - 270, 390, 260, 160};
+  DrawRectangleRec(paramArea, (Color){220, 220, 220, 190});
+  DrawRectangleLinesEx(paramArea, 2, DARKGRAY);
+
+  DrawText("--- Parametros ---", paramArea.x + 10, paramArea.y + 10, 20, BLACK);
+
+  // Define as áreas das caixas de texto
+  int startX = paramArea.x + 10;
+  int startY = paramArea.y + 40;
+  int boxW = 80, boxH = 30, spacing = 40;
+  Rectangle boxCap = {startX + 150, startY, boxW, boxH};
+  Rectangle boxTime = {startX + 150, startY + spacing, boxW, boxH};
+  Rectangle boxProb = {startX + 150, startY + 2 * spacing, boxW, boxH};
+
+  // Lógica de interação com o mouse para focar nas caixas
+  if (IsMouseButtonPressed(MOUSE_LEFT_BUTTON))
+  {
+    if (CheckCollisionPointRec(GetMousePosition(), boxCap))
+      activeBox = 0;
+    else if (CheckCollisionPointRec(GetMousePosition(), boxTime))
+      activeBox = 1;
+    else if (CheckCollisionPointRec(GetMousePosition(), boxProb))
+      activeBox = 2;
+    else
+      activeBox = -1;
+  }
+
+  // Desenha os rótulos e as caixas de texto
+  DrawText("Cap. enlace:", startX, startY + 5, 20, DARKGRAY);
+  DrawRectangleLinesEx(boxCap, 2, (activeBox == 0) ? RED : DARKGRAY);
+  DrawText(capacityText, boxCap.x + 5, boxCap.y + 5, 20, BLACK);
+
+  DrawText("Timeout (s):", startX, startY + spacing + 5, 20, DARKGRAY);
+  DrawRectangleLinesEx(boxTime, 2, (activeBox == 1) ? RED : DARKGRAY);
+  DrawText(timeoutText, boxTime.x + 5, boxTime.y + 5, 20, BLACK);
+
+  DrawText("Prob. suc. :", startX, startY + 2 * spacing + 5, 20, DARKGRAY);
+  DrawRectangleLinesEx(boxProb, 2, (activeBox == 2) ? RED : DARKGRAY);
+  DrawText(probText, boxProb.x + 5, boxProb.y + 5, 20, BLACK);
+
+  // Lógica para edição do texto da caixa ativa
+  if (activeBox != -1)
+  {
+    char *targetText = NULL;
+    if (activeBox == 0)
+      targetText = capacityText;
+    if (activeBox == 1)
+      targetText = timeoutText;
+    if (activeBox == 2)
+      targetText = probText;
+
+    SetMouseCursor(MOUSE_CURSOR_IBEAM);
+    int key = GetCharPressed();
+    while (key > 0)
+    {
+      // Permite apenas números e um ponto decimal para float
+      if ((key >= '0' && key <= '9') || (key == '.' && activeBox != 0))
+      {
+        int len = strlen(targetText);
+        if (len < 7)
+        {
+          targetText[len] = (char)key;
+          targetText[len + 1] = '\0';
+        }
+      }
+      key = GetCharPressed();
+    }
+    if (IsKeyPressed(KEY_BACKSPACE))
+    {
+      int len = strlen(targetText);
+      if (len > 0)
+        targetText[len - 1] = '\0';
+    }
+
+    // Atualiza as variáveis globais com os valores das caixas de texto
+    *capacity = atoi(capacityText);
+    *timeout = atof(timeoutText);
+    *prob = atof(probText);
+
+    // Garante que os valores estejam dentro de limites razoáveis
+    if (*capacity < 1)
+      *capacity = 1;
+    if (*timeout < 0.1f)
+      *timeout = 0.1f;
+    if (*prob < 0.0f)
+      *prob = 0.0f;
+    if (*prob > 1.0f)
+      *prob = 1.0f;
+  }
+  else
+  {
+    SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+  }
+}
 //====================================================================================
 // FUNÇÃO PRINCIPAL
 //====================================================================================
@@ -780,7 +904,7 @@ int main(void)
   {
     Vector2 mouse = GetMousePosition();
     float dt = GetFrameTime();
-    Rectangle uiArea = {screenW - 220, 10, 210, 190};
+    Rectangle uiArea = {screenW - 260, 10, 250, 550};
 
     if (sendPressed)
     {
@@ -873,6 +997,7 @@ int main(void)
     DrawQueuedMessages();
     DrawUI(uiArea, &uiFromNode, &uiToNode, &uiMsgCount, &sendPressed);
     DrawStatistics(screenW);
+    DrawParametersUI(screenW, &g_link_capacity, &g_timeout_seconds, &g_prob_success);
     DrawText("ESQ: Adicionar | DIR: Conectar", 10, 10, 20, DARKGRAY);
     DrawText("Q: Rede Padrao | W: Limpar | P: Status | B: Rajada", 10, 40, 20, DARKGRAY);
     DrawText("CTRL+Z: Desfazer", 10, 70, 20, DARKGRAY);
