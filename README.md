@@ -60,8 +60,7 @@ Essas métricas podem ser exibidas ao final da simulação ou armazenadas para a
 
 ## 🚀 Próximos Passos
 - Implementar o **Makefile**.
-- Adicionar interface gráfica com **raylib/raygui**.
-- Criar suporte a múltiplas threads (para simular tráfego paralelo).
+- Modularizar o código
 - Exportar métricas em formato CSV/JSON para análise.
 
 ## 🤝 Contribuindo
