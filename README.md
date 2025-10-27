@@ -56,12 +56,8 @@ Durante a execução:
 - **Latência:** tempo médio de entrega de pacotes entre dois nós.  
 - **Taxa de entrega:** percentual de pacotes que chegaram ao destino.  
 
-Essas métricas podem ser exibidas ao final da simulação ou armazenadas para análise posterior.
+Essas métricas podem ser exibidas ao final da simulação.
 
-## 🚀 Próximos Passos
-- Implementar o **Makefile**.
-- Modularizar o código
-- Exportar métricas em formato CSV/JSON para análise.
 
 ## 🤝 Contribuindo
 1. Faça um fork do projeto.
@@ -71,5 +67,5 @@ Essas métricas podem ser exibidas ao final da simulação ou armazenadas para a
 
 
 Autor: [Gabriel Bozelli](https://github.com/gbozelli)  
-Engenharia de Telecomunicações — UNESP  
-Bolsista FAPESP | Pesquisador em Redes e Sistemas de Comunicação
+Engenharia de Telecomunicações - UNESP
+Bolsista FAPESP | Pesquisador em Redes Neurais
